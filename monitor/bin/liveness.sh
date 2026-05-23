@@ -12,3 +12,6 @@ run_check liveness.log_freshness check_miner_log_fresh     0   # immediate, no t
 run_check liveness.registered    check_metagraph_registered  0  # immediate — triggers auto-rereg
 run_check liveness.incentive     check_incentive_floor       1  # 1 miss tolerated (avoid transient noise)
 run_check liveness.tao_balance   check_tao_balance           0  # immediate — low funds = actionable
+
+# Deregistration risk: alert if rank > 230 AND declining for 2+ consecutive hours
+bash "$MONITOR_ROOT/bin/check_dereg_risk.sh" 2>/dev/null || true

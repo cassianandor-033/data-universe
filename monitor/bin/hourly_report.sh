@@ -171,6 +171,71 @@ else
   alert_line="🚨 ${active_count} active: ${alert_names}"
 fi
 
+# ── incentive trend (from incentive_history.tsv) ─────────────────────────
+incentive_trend=$("$PYTHON" - <<'PYEOF' 2>/dev/null
+import os, datetime
+
+tsv = os.path.join(os.environ['MONITOR_ROOT'], 'data', 'incentive_history.tsv')
+try:
+    with open(tsv) as f:
+        rows = [l.strip().split('\t') for l in f if l.strip() and not l.startswith('timestamp')]
+except FileNotFoundError:
+    print("no history yet")
+    exit()
+
+if not rows:
+    print("no data points yet")
+    exit()
+
+def parse_row(r):
+    try:
+        ts = datetime.datetime.strptime(r[0], '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=datetime.timezone.utc)
+        inc = float(r[1])
+        rank = int(r[2])
+        alpha = float(r[4]) if len(r) > 4 else 0.0
+        return ts, inc, rank, alpha
+    except Exception:
+        return None
+
+parsed = [p for p in (parse_row(r) for r in rows) if p]
+if not parsed:
+    print("no valid data points")
+    exit()
+
+now = datetime.datetime.now(datetime.timezone.utc)
+latest = parsed[-1]
+cur_ts, cur_inc, cur_rank, cur_alpha = latest
+
+def find_nearest(minutes_ago):
+    target = now - datetime.timedelta(minutes=minutes_ago)
+    best = min(parsed, key=lambda p: abs((p[0] - target).total_seconds()))
+    age = abs((best[0] - target).total_seconds()) / 60
+    if age > minutes_ago * 0.5 + 30:  # too far from target
+        return None
+    return best
+
+def trend_str(old_inc, label):
+    if old_inc is None:
+        return f"{label}: n/a"
+    delta = cur_inc - old_inc
+    arrow = "📈" if delta > 0 else ("📉" if delta < 0 else "➡️")
+    sign = "+" if delta >= 0 else ""
+    return f"{arrow} {sign}{delta:.6f} vs {label}"
+
+p1h  = find_nearest(60)
+p6h  = find_nearest(360)
+p24h = find_nearest(1440)
+
+lines = [
+    f"incentive={cur_inc:.6f}  rank={cur_rank}/256  α={cur_alpha:.4f}ν",
+    trend_str(p1h[1]  if p1h  else None, "1h ago"),
+    trend_str(p6h[1]  if p6h  else None, "6h ago"),
+    trend_str(p24h[1] if p24h else None, "24h ago"),
+]
+print('\n'.join(lines))
+PYEOF
+)
+
 # ── wallet alpha ─────────────────────────────────────────────────────────
 alpha=$("$PYTHON" - <<'PYEOF' 2>/dev/null
 import sys, os
@@ -195,6 +260,9 @@ message="📊 **SN13 Hourly Report** — ${ts}
 
 **On-chain:** ${onchain}
 **Alpha staked:** ${alpha}
+
+**Incentive trend:**
+${incentive_trend}
 
 **Process:** ${process_status}
 **Axon:** ${axon_status}
