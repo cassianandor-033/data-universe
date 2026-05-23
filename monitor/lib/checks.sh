@@ -80,6 +80,18 @@ PYEOF
   fi
   if [[ "$result" == "NOT_REGISTERED" ]]; then
     echo "hotkey $MINER_HOTKEY is NOT in metagraph — deregistered"
+    # Auto re-register
+    "$MONITOR_ROOT/bin/alert.sh" FIRING "liveness.registered" "hotkey $MINER_HOTKEY is NOT in metagraph — attempting auto re-register" || true
+    "$PYTHON" - <<'PYEOF' 2>&1
+import bittensor as bt
+import sys
+sub = bt.subtensor('finney')
+w = bt.wallet(name='CrustyTY', hotkey='default')
+print(f"[auto-rereg] Registering hotkey {w.hotkey.ss58_address} on SN13...")
+ok = sub.burned_register(wallet=w, netuid=13, wait_for_inclusion=True, wait_for_finalization=True)
+print(f"[auto-rereg] Success: {ok}")
+sys.exit(0 if ok else 1)
+PYEOF
     return 1
   fi
   return 0

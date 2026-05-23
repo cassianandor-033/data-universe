@@ -11,7 +11,7 @@ HEALTHCHECK_PY="$MINER_ROOT/sn13_healthcheck.py"
 PYTHON="$MINER_ROOT/venv/bin/python"
 
 # ── miner identity ──────────────────────────────────────────────────────────
-MINER_UID="${MINER_UID:-243}"
+MINER_UID="${MINER_UID:-28}"
 MINER_HOTKEY="${MINER_HOTKEY:-5CfD9YLN16GP9XhowBpAdYaFfdg3Gkdh8VPe56qfLUoLe16E}"
 AXON_PORT="${AXON_PORT:-8091}"
 
