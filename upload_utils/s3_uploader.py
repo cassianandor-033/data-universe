@@ -24,9 +24,24 @@ from common.data import DataSource
 
 
 def load_dynamic_lookup() -> Dict[str, List[Dict]]:
-    """Load dynamic desirability lookup from dynamic_desirability/total.json"""
+    """Load dynamic desirability lookup.
+
+    Checks paths in priority order:
+    1. state/desirability_total.json (written by miner's _refresh_desirability thread)
+    2. dynamic_desirability/total.json (legacy path, walked up 3 dirs)
+    """
     try:
-        # Look for dynamic_desirability/total.json in current directory or parent directories
+        # Priority 1: state/desirability_total.json (miner refresh thread writes here)
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        miner_root = os.path.dirname(script_dir)  # upload_utils/../ = miner root
+        state_path = os.path.join(miner_root, "state", "desirability_total.json")
+        if os.path.exists(state_path):
+            with open(state_path, 'r') as f:
+                data = json.load(f)
+            bt.logging.info(f"Loaded dynamic lookup from {state_path} ({len(data)} jobs)")
+            return data
+
+        # Priority 2: legacy dynamic_desirability/total.json walked up from cwd
         current_dir = os.getcwd()
         for _ in range(3):  # Check up to 3 levels up
             total_json_path = os.path.join(current_dir, "dynamic_desirability", "total.json")
@@ -37,7 +52,7 @@ def load_dynamic_lookup() -> Dict[str, List[Dict]]:
                     return data
             current_dir = os.path.dirname(current_dir)
 
-        bt.logging.warning("dynamic_desirability/total.json not found, returning empty lookup")
+        bt.logging.warning("No desirability jobs found: checked state/desirability_total.json and dynamic_desirability/total.json")
         return {}
     except Exception as e:
         bt.logging.error(f"Error loading dynamic lookup: {e}")

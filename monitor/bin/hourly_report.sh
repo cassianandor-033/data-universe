@@ -117,6 +117,51 @@ except Exception as e:
 PYEOF
 )
 
+# ── S3 upload status ─────────────────────────────────────────────────────
+s3_status=$("$PYTHON" - <<'PYEOF' 2>/dev/null
+import re, datetime, os
+log_path = os.environ['MINER_LOG']
+cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=4)
+last_success = None
+last_fail = None
+last_attempt = None
+fail_reason = ""
+try:
+    with open(log_path, 'r', errors='replace') as f:
+        for line in f:
+            m = re.search(r'(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})', line)
+            if not m:
+                continue
+            try:
+                t = datetime.datetime.strptime(m.group(1), '%Y-%m-%d %H:%M:%S').replace(
+                    tzinfo=datetime.timezone.utc)
+            except Exception:
+                continue
+            if 'Starting S3 partitioned upload' in line:
+                last_attempt = t
+            elif 'S3 partitioned upload completed successfully' in line:
+                last_success = t
+            elif 'S3 partitioned upload completed with some failures' in line:
+                last_fail = t
+            elif 'No jobs found from Gravity' in line and last_attempt:
+                fail_reason = "no_jobs_from_gravity"
+    if last_success:
+        age = int((datetime.datetime.now(datetime.timezone.utc) - last_success).total_seconds() / 60)
+        print(f"SUCCESS {age}m ago")
+    elif last_fail:
+        age = int((datetime.datetime.now(datetime.timezone.utc) - last_fail).total_seconds() / 60)
+        detail = f" ({fail_reason})" if fail_reason else ""
+        print(f"FAIL {age}m ago{detail}")
+    elif last_attempt:
+        age = int((datetime.datetime.now(datetime.timezone.utc) - last_attempt).total_seconds() / 60)
+        print(f"IN_PROGRESS last attempt {age}m ago")
+    else:
+        print("no upload attempts in log")
+except Exception as e:
+    print(f"? ({e})")
+PYEOF
+)
+
 # ── active alerts ─────────────────────────────────────────────────────────
 active_count=$(ls "$MONITOR_ROOT/state/active_alerts/" 2>/dev/null | wc -l | tr -d ' ')
 if [[ "$active_count" -eq 0 ]]; then
@@ -157,6 +202,7 @@ message="📊 **SN13 Hourly Report** — ${ts}
 
 **Scraping (last 1h):** ${rates}
 **Gravity jobs (last 1h):** ${gravity}
+**S3 upload:** ${s3_status}
 
 **Alerts:** ${alert_line}"
 
