@@ -1,0 +1,20 @@
+SHELL=/bin/bash
+PATH=/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin:/Users/terryyuan/.local/bin
+HOME=/Users/terryyuan
+MINER_UID=243
+MINER_HOTKEY=5CfD9YLN16GP9XhowBpAdYaFfdg3Gkdh8VPe56qfLUoLe16E
+AXON_PORT=8091
+DISCORD_ALERT_CHANNEL=1507239914755063900
+FLAREPROX_URLS=https://flareprox-1779252573-azgdag.terryyuan03.workers.dev
+
+# L1 — Liveness probe (every 1 min)
+*    * * * * /Users/terryyuan/company/fish/miners/data-universe/monitor/bin/liveness.sh >> /Users/terryyuan/company/fish/miners/data-universe/monitor/state/liveness.log 2>&1
+
+# L2 — Pipeline probe (every 15 min)
+*/15 * * * * /Users/terryyuan/company/fish/miners/data-universe/monitor/bin/pipeline.sh >> /Users/terryyuan/company/fish/miners/data-universe/monitor/state/pipeline.log 2>&1
+
+# L3 — Compliance probe + hourly Discord report (every hour)
+0    * * * * /Users/terryyuan/company/fish/miners/data-universe/monitor/bin/compliance.sh >> /Users/terryyuan/company/fish/miners/data-universe/monitor/state/compliance.log 2>&1
+
+# Daily log rotation (3am)
+0    3 * * * /usr/bin/find /Users/terryyuan/company/fish/miners/data-universe/monitor/state -name "*.log" -size +50M -exec sh -c 'mv "$1" "${1}.$(date +\%Y\%m\%d)"' _ {} \; 2>/dev/null
