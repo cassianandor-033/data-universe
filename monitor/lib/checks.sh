@@ -80,18 +80,28 @@ PYEOF
   fi
   if [[ "$result" == "NOT_REGISTERED" ]]; then
     echo "hotkey $MINER_HOTKEY is NOT in metagraph — deregistered"
-    # Auto re-register
+    # Auto re-register — log attempt and result to monitor.log for visibility
+    echo "AUTOFIX reregister ATTEMPT $(date -u +%FT%TZ)" >> "$MONITOR_ROOT/state/monitor.log"
     "$MONITOR_ROOT/bin/alert.sh" FIRING "liveness.registered" "hotkey $MINER_HOTKEY is NOT in metagraph — attempting auto re-register" || true
-    "$PYTHON" - <<'PYEOF' 2>&1
-import bittensor as bt
+    local rereg_out rereg_rc
+    rereg_out=$("$PYTHON" - 2>&1 <<'PYEOF'
 import sys
+sys.path.insert(0, '/Users/terryyuan/company/fish/miners/data-universe')
+import bittensor as bt
 sub = bt.subtensor('finney')
 w = bt.wallet(name='CrustyTY', hotkey='default')
 print(f"[auto-rereg] Registering hotkey {w.hotkey.ss58_address} on SN13...")
 ok = sub.burned_register(wallet=w, netuid=13, wait_for_inclusion=True, wait_for_finalization=True)
-print(f"[auto-rereg] Success: {ok}")
+print(f"[auto-rereg] result={ok}")
 sys.exit(0 if ok else 1)
 PYEOF
+)
+    rereg_rc=$?
+    if (( rereg_rc == 0 )); then
+      echo "AUTOFIX reregister SUCCESS $(date -u +%FT%TZ)" >> "$MONITOR_ROOT/state/monitor.log"
+    else
+      echo "AUTOFIX reregister FAIL $(date -u +%FT%TZ) | $rereg_out" >> "$MONITOR_ROOT/state/monitor.log"
+    fi
     return 1
   fi
   return 0

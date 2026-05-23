@@ -8,14 +8,18 @@ source "$MONITOR_ROOT/lib/log.sh"
 alert_key="$1"
 
 # 1. Rate-limit autofix attempts
-recent_autofixes=$(grep "^AUTOFIX " "$MONITOR_ROOT/state/monitor.log" 2>/dev/null \
-  | awk -v cut="$(date -u -v-1H +%FT%TZ 2>/dev/null || date -u -d '1 hour ago' +%FT%TZ 2>/dev/null)" \
-    '$1 > cut' | wc -l | tr -d ' ')
-if (( recent_autofixes >= AUTOFIX_MAX_PER_HOUR )); then
-  "$MONITOR_ROOT/bin/alert.sh" INFO "$alert_key" \
-    "autofix rate-limit hit (${recent_autofixes}/${AUTOFIX_MAX_PER_HOUR} per hr) — manual intervention needed"
-  "$MONITOR_ROOT/bin/diag_bundle.sh" "$alert_key"
-  exit 0
+# Re-registration is never rate-limited — every minute unregistered costs TAO.
+if [[ "$alert_key" != "liveness.registered" ]]; then
+  # grep exits 1 when no matches found; { ... || true; } prevents pipefail from killing the script.
+  recent_autofixes=$({ grep "^AUTOFIX " "$MONITOR_ROOT/state/monitor.log" 2>/dev/null || true; } \
+    | awk -v cut="$(date -u -v-1H +%FT%TZ 2>/dev/null || date -u -d '1 hour ago' +%FT%TZ 2>/dev/null)" \
+      '$1 > cut' | wc -l | tr -d ' ')
+  if (( recent_autofixes >= AUTOFIX_MAX_PER_HOUR )); then
+    "$MONITOR_ROOT/bin/alert.sh" INFO "$alert_key" \
+      "autofix rate-limit hit (${recent_autofixes}/${AUTOFIX_MAX_PER_HOUR} per hr) — manual intervention needed"
+    "$MONITOR_ROOT/bin/diag_bundle.sh" "$alert_key"
+    exit 0
+  fi
 fi
 
 # 2. Decision tree
