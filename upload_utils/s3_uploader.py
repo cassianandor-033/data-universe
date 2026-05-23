@@ -23,6 +23,21 @@ from common.api_client import DataUniverseApiClient
 from common.data import DataSource
 
 
+def _to_iso_string(v):
+    """Coerce scraped_at-style values to ISO strings.
+
+    PyArrow infers parquet dtype from values: a chunk of pure ISO strings
+    becomes string, a chunk containing any datetime object becomes
+    timestamp[ns]. Forcing strings here keeps the column type stable
+    across miners and chunks.
+    """
+    if v is None:
+        return None
+    if isinstance(v, dt.datetime):
+        return v.isoformat()
+    return str(v)
+
+
 def load_dynamic_lookup() -> Dict[str, List[Dict]]:
     """Load dynamic desirability lookup.
 
@@ -453,7 +468,7 @@ class S3PartitionedUploader:
                     'score': df['decoded_content'].apply(lambda x: x.get('score')),
                     'upvote_ratio': df['decoded_content'].apply(lambda x: x.get('upvote_ratio')),
                     'num_comments': df['decoded_content'].apply(lambda x: x.get('num_comments')),
-                    'scrapedAt': df['decoded_content'].apply(lambda x: x.get('scrapedAt')),
+                    'scrapedAt': df['decoded_content'].apply(lambda x: _to_iso_string(x.get('scrapedAt'))),
                 })
             else:
                 # X/Twitter data structure (uri removed — validator uses url column)
@@ -490,7 +505,7 @@ class S3PartitionedUploader:
                     'cover_picture_url': df['decoded_content'].apply(lambda x: x.get('cover_picture_url')),
                     'user_followers_count': df['decoded_content'].apply(lambda x: x.get('user_followers_count')),
                     'user_following_count': df['decoded_content'].apply(lambda x: x.get('user_following_count')),
-                    'scraped_at': df['decoded_content'].apply(lambda x: x.get('scraped_at')),
+                    'scraped_at': df['decoded_content'].apply(lambda x: _to_iso_string(x.get('scraped_at'))),
                 })
 
             return result_df
