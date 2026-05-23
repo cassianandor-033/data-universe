@@ -29,6 +29,7 @@ COMPLIANCE_TOLERATE=3             # 3 consecutive hourly cycles (= ~3h regressio
 # ── registration / balance thresholds ───────────────────────────────────────
 INCENTIVE_FLOOR_WARN="${INCENTIVE_FLOOR_WARN:-0.0003}"   # below this → deregistration risk
 TAO_BALANCE_WARN="${TAO_BALANCE_WARN:-0.10}"             # below this → ~8 re-registrations left
+X_SUCCESS_RATE_WARN="${X_SUCCESS_RATE_WARN:-50}"         # alert if X on-demand success rate < this %
 
 # ── alert channels ──────────────────────────────────────────────────────────
 # Using Discord bot token (not webhook) to post to living-miner channel
@@ -56,4 +57,4 @@ export MINER_UID MINER_HOTKEY AXON_PORT
 export DISCORD_BOT_TOKEN DISCORD_ALERT_CHANNEL ALERT_NTFY_TOPIC ALERT_MAIL_TO
 export AUTOFIX_RESTART_MINER AUTOFIX_RESTART_FLAREPROX AUTOFIX_RUN_PRUNER AUTOFIX_REFRESH_DESIRABILITY AUTOFIX_MAX_PER_HOUR
 export MINER_LAUNCH_CMD FLAREPROX_URLS
-export INCENTIVE_FLOOR_WARN TAO_BALANCE_WARN
+export INCENTIVE_FLOOR_WARN TAO_BALANCE_WARN X_SUCCESS_RATE_WARN

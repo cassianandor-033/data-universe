@@ -154,3 +154,61 @@ PYEOF
   fi
   return 0
 }
+
+# Returns 1 (warning) if X on-demand success rate < 50% in the last 30 min.
+# Success = NitterScraper returned at least 1 item; failure = "returned 0 items".
+# Counts are logged to monitor.log as an info event regardless.
+check_x_ondemand_success_rate() {
+  [[ -f "$MINER_LOG" ]] || return 0  # soft-pass if log missing
+  local window_secs=1800  # 30 minutes
+  local since_ts
+  since_ts=$(date -u -v-${window_secs}S +%FT%T 2>/dev/null || date -u -d "-${window_secs} seconds" +%FT%T 2>/dev/null)
+
+  # Count X on-demand jobs attempted (log line: "X on-demand:")
+  local attempted
+  attempted=$(awk -v since="$since_ts" '
+    $0 ~ /X on-demand:/ {
+      # Extract timestamp from log line (format: 2026-05-23 03:11:01.482)
+      if (match($0, /[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}/)) {
+        ts = substr($0, RSTART, RLENGTH)
+        gsub(/ /, "T", ts)
+        if (ts >= since) count++
+      }
+    }
+    END { print count+0 }
+  ' "$MINER_LOG")
+
+  # Count jobs with zero results (log line: "returned 0 items for")
+  local zero_results
+  zero_results=$(awk -v since="$since_ts" '
+    $0 ~ /NitterScraper: returned 0 items/ {
+      if (match($0, /[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}/)) {
+        ts = substr($0, RSTART, RLENGTH)
+        gsub(/ /, "T", ts)
+        if (ts >= since) count++
+      }
+    }
+    END { print count+0 }
+  ' "$MINER_LOG")
+
+  local with_results=$(( attempted - zero_results ))
+
+  # Log the counts unconditionally for the hourly report
+  log_event "pipeline.x_ondemand_rate" INFO "last 30m: attempted=${attempted} with_results=${with_results} zero=${zero_results}"
+
+  # Warn only if we had enough jobs to measure AND success rate is poor
+  if (( attempted < 3 )); then
+    return 0  # not enough data
+  fi
+
+  local pct
+  pct=$(awk -v r="$with_results" -v t="$attempted" 'BEGIN{printf "%.0f", (r/t)*100}')
+  local x_success_threshold="${X_SUCCESS_RATE_WARN:-50}"
+  local below
+  below=$(awk -v p="$pct" -v thresh="$x_success_threshold" 'BEGIN{print (p+0 < thresh+0) ? "1" : "0"}')
+  if [[ "$below" == "1" ]]; then
+    echo "X on-demand success rate ${pct}% (${with_results}/${attempted} in last 30m) < ${x_success_threshold}% threshold"
+    return 1
+  fi
+  return 0
+}

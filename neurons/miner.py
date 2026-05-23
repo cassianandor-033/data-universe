@@ -56,16 +56,45 @@ from common.protocol import OnDemandRequest
 from common.date_range import DateRange
 from scraping.scraper import ScrapeConfig, ScraperId
 
-from scraping.x.apidojo_scraper import ApiDojoTwitterScraper
+from scraping.x.nitter_scraper import NitterScraper
+from scraping.x.syndication_scraper import SyndicationScraper
 from scraping.reddit.reddit_custom_scraper import RedditCustomScraper
 from scraping.reddit.reddit_json_scraper import RedditJsonScraper
 import json
 
 from vali_utils.on_demand.output_models import create_organic_output_dict
 
+import os
+
 # Enable logging to the miner TODO move it to some different location
 bt.logging.set_info(True)
 bt.logging.set_debug(True)
+
+
+def _build_dynamic_labels(jobs: list, source_name: str, top_n: int = 30) -> list:
+    """
+    Filter and rank desirability jobs for a given source.
+
+    Args:
+        jobs: list of job dicts (from desirability_total.json or DD API)
+        source_name: "x" or "reddit"
+        top_n: maximum labels to return
+
+    Returns:
+        List of {"label": str, "weight": float} dicts, sorted by weight desc.
+    """
+    import os as _os
+
+    min_weight = float(_os.environ.get("SN13_MIN_LABEL_WEIGHT", "0.05"))
+    filtered = [
+        {"label": j["params"]["label"], "weight": j["weight"]}
+        for j in jobs
+        if j.get("params", {}).get("platform") == source_name
+        and j.get("params", {}).get("label")
+        and j.get("weight", 0) >= min_weight
+    ]
+    filtered.sort(key=lambda x: x["weight"], reverse=True)
+    return filtered[:top_n]
 
 
 class Miner:
@@ -143,6 +172,7 @@ class Miner:
         self.compressed_index_refresh_thread: threading.Thread = None
         self.lookup_thread: threading.Thread = None
         self.s3_partitioned_thread: threading.Thread = None
+        self.desirability_refresh_thread: threading.Thread = None
 
         self.lock = threading.RLock()
         self.vpermit_rao_limit = self.config.vpermit_rao_limit
@@ -219,6 +249,53 @@ class Miner:
                 bt.logging.error(traceback.format_exc())
                 # Sleep 5 minutes to avoid constant refresh attempts if they are consistently erroring.
                 time.sleep(60 * 5)
+
+    def _refresh_desirability(self):
+        """
+        Background thread: refreshes dynamic desirability from the API every
+        SN13_DESIRABILITY_REFRESH_SEC seconds (default 3600).
+        Saves to state/desirability_total.json and writes state/scrape_plan.json.
+        Falls back gracefully if the API is unavailable.
+        """
+        refresh_sec = int(os.environ.get("SN13_DESIRABILITY_REFRESH_SEC", "3600"))
+        state_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "state")
+        os.makedirs(state_dir, exist_ok=True)
+        desirability_path = os.path.join(state_dir, "desirability_total.json")
+        scrape_plan_path = os.path.join(state_dir, "scrape_plan.json")
+
+        while not self.should_exit:
+            try:
+                bt.logging.info("Refreshing dynamic desirability from API...")
+
+                async def _fetch():
+                    async with self._on_demand_client() as client:
+                        from dynamic_desirability.desirability_retrieval import _dd_list_to_jobs_json
+                        dd_list = await client.miner_get_latest_dd_list()
+                        return _dd_list_to_jobs_json(dd_list)
+
+                jobs = asyncio.run(_fetch())
+
+                with open(desirability_path, "w") as f:
+                    json.dump(jobs, f, indent=2, default=str)
+                bt.logging.info(f"Saved desirability_total.json ({len(jobs)} entries)")
+
+                # Build and write scrape plans for both sources
+                plan = {}
+                for source_id, source_name in ((1, "reddit"), (2, "x")):
+                    labels = _build_dynamic_labels(
+                        jobs=jobs,
+                        source_name=source_name,
+                        top_n=30,
+                    )
+                    plan[source_name] = labels
+                with open(scrape_plan_path, "w") as f:
+                    json.dump({"updated_at": dt.datetime.utcnow().isoformat(), "plan": plan}, f, indent=2)
+                bt.logging.info(f"Wrote scrape_plan.json")
+
+            except Exception:
+                bt.logging.error(f"Desirability refresh failed:\n{traceback.format_exc()}")
+
+            time.sleep(refresh_sec)
 
     def get_updated_lookup(self):
         if not self.use_gravity_retrieval:
@@ -453,7 +530,8 @@ class Miner:
                 data_source = DataSource.X
                 x_job: OnDemandJobPayloadX = job_request.job
                 usernames = x_job.usernames
-                keywords = x_job.keywords
+                # OnDemandRequest.keywords is capped at 5; truncate to avoid pydantic ValidationError
+                keywords = (x_job.keywords or [])[:5]
                 url = x_job.url
 
             if job_request.job.platform == "reddit":
@@ -550,6 +628,11 @@ class Miner:
             )
             self.on_demand_thread.start()
 
+            self.desirability_refresh_thread = threading.Thread(
+                target=self._refresh_desirability, daemon=True
+            )
+            self.desirability_refresh_thread.start()
+
             self.is_running = True
             bt.logging.debug("Started")
 
@@ -565,6 +648,8 @@ class Miner:
             # self.s3_partitioned_thread.join(5)
             self.lookup_thread.join(5)
             self.on_demand_thread.join(5)
+            if self.desirability_refresh_thread:
+                self.desirability_refresh_thread.join(5)
 
             self.is_running = False
             bt.logging.debug("Stopped")
@@ -718,11 +803,13 @@ class Miner:
 
             bt.logging.info(f"Date range: {start_dt} to {end_dt}")
 
-            # For X source, use the standard scraper with on_demand_scrape
+            # For X source: try NitterScraper first, fall back to SyndicationScraper if 0 results.
+            # SyndicationScraper uses FlareProx (Cloudflare Workers) when FLAREPROX_URLS is set.
             if synapse.source == DataSource.X:
-                # Initialize the standard scraper (now includes low-engagement posts)
-                scraper = ApiDojoTwitterScraper()
-                data_entities = await scraper.on_demand_scrape(
+                bt.logging.info(f"X on-demand: usernames={synapse.usernames} keywords={synapse.keywords} url={synapse.url} kw_mode={synapse.keyword_mode}")
+                nitter = NitterScraper()
+                bt.logging.info("Using NitterScraper for on-demand (recent tweets)")
+                data_entities = await nitter.on_demand_scrape(
                     usernames=synapse.usernames,
                     keywords=synapse.keywords,
                     url=synapse.url,
@@ -731,6 +818,23 @@ class Miner:
                     end_datetime=end_dt,
                     limit=synapse.limit,
                 )
+
+                # Fall back to SyndicationScraper if Nitter returned nothing and we have usernames.
+                # Syndication supports username timelines reliably (proxied via FlareProx).
+                # Keyword-only searches are skipped — niche X keywords genuinely have no results.
+                if not data_entities and synapse.usernames:
+                    bt.logging.info("NitterScraper returned 0; falling back to SyndicationScraper for usernames")
+                    syndication = SyndicationScraper()
+                    data_entities = await syndication.on_demand_scrape(
+                        usernames=synapse.usernames,
+                        keywords=synapse.keywords,
+                        url=synapse.url,
+                        keyword_mode=synapse.keyword_mode,
+                        start_datetime=start_dt,
+                        end_datetime=end_dt,
+                        limit=synapse.limit,
+                    )
+                    bt.logging.info(f"SyndicationScraper fallback returned {len(data_entities)} items")
 
                 # Update response with data entities (already includes all enhanced fields)
                 synapse.data = (

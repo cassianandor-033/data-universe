@@ -40,5 +40,6 @@ for alert_file in "$MONITOR_ROOT/state/active_alerts/"pipeline.*; do
 done
 
 # 4. Special cases not in healthcheck
-run_check pipeline.s3_recency  check_s3_recency  "$PIPELINE_TOLERATE"
-run_check pipeline.disk_space  check_disk_space  0
+run_check pipeline.s3_recency         check_s3_recency              "$PIPELINE_TOLERATE"
+run_check pipeline.disk_space         check_disk_space              0
+run_check pipeline.x_ondemand_rate    check_x_ondemand_success_rate "$PIPELINE_TOLERATE"
