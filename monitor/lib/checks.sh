@@ -80,9 +80,44 @@ PYEOF
   fi
   if [[ "$result" == "NOT_REGISTERED" ]]; then
     echo "hotkey $MINER_HOTKEY is NOT in metagraph — deregistered"
-    # Auto re-register — log attempt and result to monitor.log for visibility
-    echo "AUTOFIX reregister ATTEMPT $(date -u +%FT%TZ)" >> "$MONITOR_ROOT/state/monitor.log"
-    "$MONITOR_ROOT/bin/alert.sh" FIRING "liveness.registered" "hotkey $MINER_HOTKEY is NOT in metagraph — attempting auto re-register" || true
+
+    # Fix A: require 2 consecutive NOT_REGISTERED polls before reregistering.
+    # The consecutive_fails counter for liveness.registered is maintained by run_check.
+    # Read the current count (run_check will increment it after we return 1, so
+    # current file value = number of prior consecutive failures before this poll).
+    local counter_file="$MONITOR_ROOT/state/consecutive_fails/liveness.registered"
+    local prior_fails
+    prior_fails=$(cat "$counter_file" 2>/dev/null || echo 0)
+    if (( prior_fails < 1 )); then
+      # First failure — return 1 so run_check increments the counter, but do NOT reregister yet.
+      echo "NOT_REGISTERED on first poll — waiting for 2nd consecutive confirmation before reregistering (prior_fails=${prior_fails})"
+      return 1
+    fi
+
+    # Fix B: hard circuit breaker — max 1 reregistration per 24h, persisted to disk.
+    local LAST_REREG_FILE="$MONITOR_ROOT/state/last_reregistration_time"
+    if [[ -f "$LAST_REREG_FILE" ]]; then
+      local last now elapsed
+      last=$(cat "$LAST_REREG_FILE")
+      now=$(date +%s)
+      elapsed=$(( now - last ))
+      if (( elapsed < 86400 )); then
+        echo "CIRCUIT BREAKER: reregistration blocked — last was ${elapsed}s ago (< 24h)"
+        log_event "autofix.reregister" BLOCKED "circuit breaker active: last_rereg=${elapsed}s ago"
+        return 1
+      fi
+    fi
+
+    # Fix C: structured log line on every reregistration attempt.
+    local last_incentive
+    last_incentive=$(tail -1 "$MONITOR_ROOT/data/incentive_history.tsv" 2>/dev/null | awk '{print $2}')
+    local ts
+    ts=$(date -u +%FT%TZ)
+    echo "AUTOFIX_REREGISTER trigger=NOT_REGISTERED_2POLL last_incentive=${last_incentive:-unknown} last_uid=${MINER_UID:-unknown} timestamp=${ts}" \
+      >> "$MONITOR_ROOT/state/monitor.log"
+    log_event "autofix.reregister" ATTEMPT "trigger=NOT_REGISTERED_2POLL last_incentive=${last_incentive:-unknown} last_uid=${MINER_UID:-unknown}"
+
+    "$MONITOR_ROOT/bin/alert.sh" FIRING "liveness.registered" "hotkey $MINER_HOTKEY is NOT in metagraph (confirmed 2 polls) — attempting auto re-register" || true
     local rereg_out rereg_rc
     rereg_out=$("$PYTHON" - 2>&1 <<'PYEOF'
 import sys
@@ -99,6 +134,8 @@ PYEOF
     rereg_rc=$?
     if (( rereg_rc == 0 )); then
       echo "AUTOFIX reregister SUCCESS $(date -u +%FT%TZ)" >> "$MONITOR_ROOT/state/monitor.log"
+      # Record timestamp for circuit breaker.
+      date +%s > "$LAST_REREG_FILE"
     else
       echo "AUTOFIX reregister FAIL $(date -u +%FT%TZ) | $rereg_out" >> "$MONITOR_ROOT/state/monitor.log"
     fi
