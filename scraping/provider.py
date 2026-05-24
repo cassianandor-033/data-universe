@@ -1,3 +1,4 @@
+import os
 import threading
 from typing import Callable, Dict
 from common.data import DataSource
@@ -8,6 +9,8 @@ from scraping.scraper import Scraper, ScraperId
 from scraping.x.microworlds_scraper import MicroworldsTwitterScraper
 from scraping.x.apidojo_scraper import ApiDojoTwitterScraper
 from scraping.x.quacker_url_scraper import QuackerUrlScraper
+from scraping.x.nitter_scraper import NitterScraper
+from scraping.x.syndication_scraper import SyndicationScraper
 
 
 DEFAULT_FACTORIES = {
@@ -16,9 +19,14 @@ DEFAULT_FACTORIES = {
     ScraperId.REDDIT_JSON: RedditJsonScraper,
     ScraperId.REDDIT_MC: RedditMCScraper,
     ScraperId.X_MICROWORLDS: MicroworldsTwitterScraper,
-    ScraperId.X_APIDOJO: ApiDojoTwitterScraper,
     ScraperId.X_QUACKER: QuackerUrlScraper,
+    ScraperId.X_NITTER: NitterScraper,
+    ScraperId.X_SYNDICATION: SyndicationScraper,
 }
+
+# Register Apify scraper only if APIFY_API_TOKEN is set
+if os.environ.get("APIFY_API_TOKEN"):
+    DEFAULT_FACTORIES[ScraperId.X_APIDOJO] = ApiDojoTwitterScraper
 
 
 class ScraperProvider:
