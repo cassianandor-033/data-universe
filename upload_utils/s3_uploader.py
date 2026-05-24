@@ -425,6 +425,11 @@ class S3PartitionedUploader:
         last_uri = cursor.get('last_uri')
         if last_dt is None:
             return ('', [])
+        # Normalise: SQLite stores datetimes with space separator; isoformat() uses 'T'.
+        # String comparison '2026-05-24 17:00' > '2026-05-24T01:00' is False because
+        # space (0x20) < 'T' (0x54), so T-format cursors silently kill all results.
+        if isinstance(last_dt, str):
+            last_dt = last_dt.replace('T', ' ')
         # Keyset pagination: (datetime > ?) OR (datetime = ? AND uri > ?)
         return (
             ' AND (datetime > ? OR (datetime = ? AND uri > ?))',
@@ -629,6 +634,8 @@ class S3PartitionedUploader:
                 last_datetime = last_datetime.isoformat()
             else:
                 last_datetime = str(last_datetime)
+            # Normalise to SQLite space format (isoformat() uses 'T' which breaks comparisons)
+            last_datetime = last_datetime.replace('T', ' ')
             last_uri = str(last_row['uri'])
             cursor = {'last_datetime': last_datetime, 'last_uri': last_uri}
 
