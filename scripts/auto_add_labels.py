@@ -3,7 +3,7 @@
 Reads the live desirability list and finds labels missing from our scraping config.
 
 Modes:
-  AUTO_ADD_ENABLED = False (default): dry-run, prints candidates only.
+  AUTO_ADD_ENABLED = True (default): dry-run, prints candidates only.
   AUTO_ADD_ENABLED = True: adds missing labels and logs the change.
 
 Quarantine logic:
@@ -15,7 +15,7 @@ import os
 import sys
 from datetime import datetime, timezone, timedelta
 
-AUTO_ADD_ENABLED = False
+AUTO_ADD_ENABLED = True
 
 REPO_ROOT = os.path.join(os.path.dirname(__file__), "..")
 DESIRABILITY_PATH = os.path.expandvars(
