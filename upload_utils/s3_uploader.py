@@ -18,9 +18,13 @@ import sqlite3
 import re
 import secrets
 from contextlib import contextmanager
-from typing import List, Dict
+from typing import List, Dict, Optional
 from common.api_client import DataUniverseApiClient
 from common.data import DataSource
+
+# Bucket size limits
+MAX_BUCKET_BYTES = 115 * 1024 * 1024   # 115 MB (90% of 128 MB platform limit)
+MIN_BUCKET_BYTES = 16 * 1024           # 16 KB (15 KB validator gate + 1 KB headroom)
 
 
 def _validate_row_for_upload(row) -> bool:
@@ -545,8 +549,14 @@ class S3PartitionedUploader:
             bt.logging.error(f"Error creating raw dataframe: {e}")
             return pd.DataFrame()
 
-    async def _upload_data_chunk(self, client: DataUniverseApiClient, df: pd.DataFrame, source: int, job_id: str) -> bool:
-        """Upload chunk via per-file presigned URL from /get-file-upload-url."""
+    async def _upload_data_chunk(self, client: DataUniverseApiClient, df: pd.DataFrame, source: int, job_id: str) -> Optional[bool]:
+        """Upload chunk via per-file presigned URL from /get-file-upload-url.
+
+        Returns:
+            True  — uploaded successfully
+            False — upload failed (error)
+            None  — file too small to upload (deferred; caller should not advance cursor)
+        """
         if df.empty:
             return True
 
@@ -566,15 +576,27 @@ class S3PartitionedUploader:
             filename = f"data_{timestamp}_{len(raw_df)}_{random_hash}.parquet"
             local_path = os.path.join(self.output_dir, filename)
 
-            # Save to parquet with snappy compression
-            raw_df.to_parquet(local_path, index=False, compression='snappy', row_group_size=10_000)
+            # Save to parquet with zstd compression
+            raw_df.to_parquet(local_path, index=False, compression='zstd', compression_level=3,
+                              use_dictionary=True, row_group_size=10_000)
+
+            # Enforce minimum file size — skip upload if below validator gate
+            file_size = os.path.getsize(local_path)
+            if file_size < MIN_BUCKET_BYTES:
+                bt.logging.info(
+                    f"Skipping upload for job {job_id}: file size {file_size:,} bytes < "
+                    f"MIN_BUCKET_BYTES {MIN_BUCKET_BYTES:,} bytes ({len(raw_df)} rows); "
+                    f"deferring to next cycle"
+                )
+                os.remove(local_path)
+                return None
 
             # Request presigned URL and upload via API
             try:
                 await client.miner_upload_parquet_file(
                     job_id=job_id, filename=filename, file_path=local_path
                 )
-                bt.logging.success(f"Uploaded {len(raw_df)} records to job {job_id}")
+                bt.logging.success(f"Uploaded {len(raw_df)} records ({file_size:,} bytes) to job {job_id}")
             except Exception as upload_err:
                 err_str = str(upload_err)
                 if "409" in err_str:
@@ -655,7 +677,12 @@ class S3PartitionedUploader:
                     chunk_df = chunk_df.iloc[:remaining]
 
             # Upload chunk via per-file presigned URL
+            # Returns True=uploaded, False=error, None=deferred (too small)
             success = await self._upload_data_chunk(client, chunk_df, source, job_id)
+            if success is None:
+                # File too small for validator — don't advance cursor, try next cycle
+                bt.logging.info(f"Job {job_id}: chunk deferred (too small), cursor not advanced")
+                break
             if not success:
                 bt.logging.error(f"Failed to upload chunk for job {job_id}")
                 return False
