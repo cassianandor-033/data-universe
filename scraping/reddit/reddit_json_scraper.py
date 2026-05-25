@@ -1,5 +1,6 @@
 import asyncio
 import aiohttp
+import threading
 import traceback
 import datetime as dt
 import bittensor as bt
@@ -21,7 +22,9 @@ from common.protocol import KeywordMode
 # WORKAROUND: limit concurrent Reddit requests to 2 and pace them 6s apart.
 # 10 concurrent threads on one IP all hit the same anon bucket and trigger mutual 429s.
 # 2 paced threads yield 3-5x more actual data.
-_REDDIT_SEMAPHORE = asyncio.Semaphore(2)
+# Use threading.Semaphore (not asyncio.Semaphore) — asyncio semaphores are event-loop-bound
+# and will raise RuntimeError when used across loops (e.g. in OD scrape tasks).
+_REDDIT_SEMAPHORE = threading.Semaphore(2)
 _REDDIT_REQUEST_PACING_SECS = 6
 
 
@@ -334,7 +337,8 @@ class RedditJsonScraper(Scraper):
         Returns:
             List of post/comment data dictionaries
         """
-        async with _REDDIT_SEMAPHORE:
+        _REDDIT_SEMAPHORE.acquire()
+        try:
             for attempt in range(self.MAX_RETRIES):
                 try:
                     async with session.get(url, timeout=self.REQUEST_TIMEOUT) as response:
@@ -380,6 +384,8 @@ class RedditJsonScraper(Scraper):
                         continue
 
             return []
+        finally:
+            _REDDIT_SEMAPHORE.release()
 
     async def _fetch_content_from_url(
         self,
