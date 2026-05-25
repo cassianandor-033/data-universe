@@ -352,8 +352,8 @@ class Miner:
             except Exception:
                 bt.logging.error(traceback.format_exc())
 
-            # Upload every 2 hours
-            time_sleep_val = dt.timedelta(hours=2).total_seconds()
+            # Upload every 15 minutes
+            time_sleep_val = dt.timedelta(minutes=15).total_seconds()  # WORKAROUND — hardcoded, refactor to config later
             time.sleep(time_sleep_val)
 
         loop.close()

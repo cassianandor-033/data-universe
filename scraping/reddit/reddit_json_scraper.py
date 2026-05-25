@@ -18,6 +18,13 @@ from scraping.reddit.utils import (
 from common.protocol import KeywordMode
 
 
+# WORKAROUND: limit concurrent Reddit requests to 2 and pace them 6s apart.
+# 10 concurrent threads on one IP all hit the same anon bucket and trigger mutual 429s.
+# 2 paced threads yield 3-5x more actual data.
+_REDDIT_SEMAPHORE = asyncio.Semaphore(2)
+_REDDIT_REQUEST_PACING_SECS = 6
+
+
 class RedditJsonScraper(Scraper):
     """
     Scrapes Reddit data using Reddit's public JSON API (no authentication required).
@@ -247,23 +254,53 @@ class RedditJsonScraper(Scraper):
 
                         url = f"{self.BASE_URL}/r/{subreddit_name}/search.json?q={search_query}&restrict_sr=1&limit={limit}&sort=new&raw_json=1"
                     else:
-                        # No keywords, just get recent posts
-                        url = f"{self.BASE_URL}/r/{subreddit_name}/new.json?limit={limit}&raw_json=1"
+                        # No keywords: paginate /new.json backwards until we cover the date range.
+                        # Jobs ask for date ranges up to ~7 days old; a single page only covers
+                        # the last ~100 posts which may be just hours old on active subreddits.
+                        import time as _time
+                        deadline = _time.monotonic() + 90  # 90s budget (jobs expire in 2min)
+                        after = None
+                        done = False
+                        while not done and len(contents) < limit:
+                            base = f"{self.BASE_URL}/r/{subreddit_name}/new.json?limit=100&raw_json=1"
+                            url = base + (f"&after={after}" if after else "")
+                            posts = await self._fetch_posts(session, url)
+                            if not posts:
+                                break
 
-                    posts = await self._fetch_posts(session, url)
+                            oldest_ts = None
+                            for post_data in posts:
+                                kind = post_data.get("kind", "")
+                                if kind == "t3":
+                                    content = self._parse_post(post_data)
+                                elif kind == "t1":
+                                    content = self._parse_comment(post_data)
+                                else:
+                                    content = self._parse_post(post_data)
 
-                    for post_data in posts:
-                        # Check if it's a post or comment based on kind
-                        kind = post_data.get("kind", "")
-                        if kind == "t3":  # Post
-                            content = self._parse_post(post_data)
-                        elif kind == "t1":  # Comment
-                            content = self._parse_comment(post_data)
-                        else:
-                            content = self._parse_post(post_data)  # Default to post parsing
+                                if content and self._matches_criteria(content, keywords, keyword_mode, start_datetime, end_datetime):
+                                    contents.append(content)
 
-                        if content and self._matches_criteria(content, keywords, keyword_mode, start_datetime, end_datetime):
-                            contents.append(content)
+                                # Track oldest post timestamp to know when to stop paginating
+                                ts = post_data.get("data", {}).get("created_utc")
+                                if ts is not None:
+                                    if oldest_ts is None or ts < oldest_ts:
+                                        oldest_ts = ts
+
+                            # Stop if oldest post is before our start window or time budget exceeded
+                            if oldest_ts is not None and start_datetime is not None:
+                                if oldest_ts < start_datetime.timestamp():
+                                    break
+                            if _time.monotonic() > deadline:
+                                bt.logging.warning(f"Pagination time budget exceeded for r/{subreddit_name}")
+                                break
+
+                            # Advance cursor using the fullname of the last post
+                            last = posts[-1]
+                            last_fullname = last.get("kind", "t3") + "_" + last.get("data", {}).get("id", "")
+                            if not last.get("data", {}).get("id"):
+                                break
+                            after = last_fullname
 
         except Exception as e:
             bt.logging.error(f"Failed to perform on-demand scrape: {e}")
@@ -297,48 +334,52 @@ class RedditJsonScraper(Scraper):
         Returns:
             List of post/comment data dictionaries
         """
-        for attempt in range(self.MAX_RETRIES):
-            try:
-                async with session.get(url, timeout=self.REQUEST_TIMEOUT) as response:
-                    if response.status == 429:
-                        # Rate limited, wait and retry
-                        retry_after = int(response.headers.get("Retry-After", self.RETRY_DELAY))
-                        bt.logging.warning(f"Rate limited, waiting {retry_after}s before retry...")
-                        await asyncio.sleep(retry_after)
-                        continue
-
-                    if response.status != 200:
-                        bt.logging.warning(f"Got status {response.status} from {url}")
-                        if attempt < self.MAX_RETRIES - 1:
-                            await asyncio.sleep(self.RETRY_DELAY)
+        async with _REDDIT_SEMAPHORE:
+            for attempt in range(self.MAX_RETRIES):
+                try:
+                    async with session.get(url, timeout=self.REQUEST_TIMEOUT) as response:
+                        if response.status == 429:
+                            # Rate limited, wait and retry
+                            retry_after = int(response.headers.get("Retry-After", self.RETRY_DELAY))
+                            bt.logging.warning(f"Rate limited, waiting {retry_after}s before retry...")
+                            await asyncio.sleep(retry_after)
                             continue
+
+                        if response.status != 200:
+                            bt.logging.warning(f"Got status {response.status} from {url}")
+                            if attempt < self.MAX_RETRIES - 1:
+                                await asyncio.sleep(self.RETRY_DELAY)
+                                continue
+                            return []
+
+                        data = await response.json()
+
+                        # Pace requests to avoid anon-bucket 429s on shared IP
+                        await asyncio.sleep(_REDDIT_REQUEST_PACING_SECS)
+
+                        # Reddit JSON API returns data in "data" -> "children" structure
+                        if isinstance(data, dict) and "data" in data:
+                            children = data["data"].get("children", [])
+                            return children
+                        elif isinstance(data, list) and len(data) > 0:
+                            # Sometimes Reddit returns a list (e.g., for comments)
+                            if "data" in data[0]:
+                                return data[0]["data"].get("children", [])
+
                         return []
 
-                    data = await response.json()
+                except asyncio.TimeoutError:
+                    bt.logging.warning(f"Timeout fetching {url}, attempt {attempt + 1}/{self.MAX_RETRIES}")
+                    if attempt < self.MAX_RETRIES - 1:
+                        await asyncio.sleep(self.RETRY_DELAY)
+                        continue
+                except Exception as e:
+                    bt.logging.error(f"Error fetching {url}: {e}")
+                    if attempt < self.MAX_RETRIES - 1:
+                        await asyncio.sleep(self.RETRY_DELAY)
+                        continue
 
-                    # Reddit JSON API returns data in "data" -> "children" structure
-                    if isinstance(data, dict) and "data" in data:
-                        children = data["data"].get("children", [])
-                        return children
-                    elif isinstance(data, list) and len(data) > 0:
-                        # Sometimes Reddit returns a list (e.g., for comments)
-                        if "data" in data[0]:
-                            return data[0]["data"].get("children", [])
-
-                    return []
-
-            except asyncio.TimeoutError:
-                bt.logging.warning(f"Timeout fetching {url}, attempt {attempt + 1}/{self.MAX_RETRIES}")
-                if attempt < self.MAX_RETRIES - 1:
-                    await asyncio.sleep(self.RETRY_DELAY)
-                    continue
-            except Exception as e:
-                bt.logging.error(f"Error fetching {url}: {e}")
-                if attempt < self.MAX_RETRIES - 1:
-                    await asyncio.sleep(self.RETRY_DELAY)
-                    continue
-
-        return []
+            return []
 
     async def _fetch_content_from_url(
         self,
