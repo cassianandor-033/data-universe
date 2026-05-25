@@ -1,6 +1,7 @@
 from collections import defaultdict
 import threading
 from common import constants, utils
+from storage.canonical_uri import canonicalize_uri
 from common.data import (
     CompressedEntityBucket,
     CompressedMinerIndex,
@@ -173,7 +174,7 @@ class SqliteMinerStorage(MinerStorage):
                 time_bucket_id = TimeBucket.from_datetime(data_entity.datetime).id
                 values.append(
                     [
-                        data_entity.uri,
+                        canonicalize_uri(data_entity.uri),
                         data_entity.datetime,
                         time_bucket_id,
                         data_entity.source,

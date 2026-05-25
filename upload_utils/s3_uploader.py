@@ -23,6 +23,32 @@ from common.api_client import DataUniverseApiClient
 from common.data import DataSource
 
 
+def _validate_row_for_upload(row) -> bool:
+    """Returns True if row should be uploaded, False if should be skipped."""
+    # Content size minimum (64 bytes)
+    content = row.get('content') if isinstance(row, dict) else getattr(row, 'content', None)
+    if content is None:
+        return False
+    raw = content if isinstance(content, bytes) else str(content).encode('utf-8')
+    if len(raw) < 64:
+        return False
+
+    # Timestamp sanity
+    from datetime import datetime, timedelta, timezone
+    now = datetime.now(timezone.utc)
+    record_dt = row.get('datetime') if isinstance(row, dict) else getattr(row, 'datetime', None)
+    if record_dt is None:
+        return False
+    if hasattr(record_dt, 'tzinfo') and record_dt.tzinfo is None:
+        record_dt = record_dt.replace(tzinfo=timezone.utc)
+    if record_dt > now:
+        return False  # Future timestamp
+    if record_dt < now - timedelta(days=30):
+        return False  # Too old
+
+    return True
+
+
 def _to_iso_string(v):
     """Coerce scraped_at-style values to ISO strings.
 
@@ -607,6 +633,15 @@ class S3PartitionedUploader:
 
             if chunk_df.empty:
                 bt.logging.info(f"No new data for job {job_id}, total processed this run: {total_processed}")
+                break
+
+            # Pre-upload validation: filter out bad records before they hit validators
+            pre_filter_len = len(chunk_df)
+            chunk_df = chunk_df[chunk_df.apply(_validate_row_for_upload, axis=1)]
+            if len(chunk_df) < pre_filter_len:
+                bt.logging.debug(f"Job {job_id}: filtered {pre_filter_len - len(chunk_df)} invalid records pre-upload")
+            if chunk_df.empty:
+                bt.logging.info(f"Job {job_id}: all records in chunk failed validation, skipping chunk")
                 break
 
             # Enforce max_rows: truncate chunk if it would exceed the cap
